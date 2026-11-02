@@ -1,0 +1,117 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Test and build iOS dylib
+    runs-on: macos-15
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "Expected a release tag such as v1.0.0." >&2
+              exit 1
+            fi
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA:0:12}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Select installed Xcode
+        run: |
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Run macOS tests
+        run: make test TEST_DEVELOPER_DIR="$DEVELOPER_DIR"
+
+      - name: Build and verify iOS library
+        run: |
+          make
+          codesign --verify --strict --verbose=2 build/OfflineGuard.dylib
+          file build/OfflineGuard.dylib
+          xcrun lipo -verify_arch arm64 build/OfflineGuard.dylib
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p build/release
+          cp build/OfflineGuard.dylib THIRD_PARTY_NOTICES.md build/release/
+          printf '%s\n' "$VERSION" > build/release/VERSION.txt
+      - name: Generate checksums
+        working-directory: build/release
+        run: shasum -a 256 OfflineGuard.dylib VERSION.txt THIRD_PARTY_NOTICES.md > SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OfflineGuard-${{ steps.version.outputs.version }}-ios-arm64
+          path: build/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: OfflineGuard-${{ needs.build.outputs.version }}-ios-arm64
+          path: release
+
+      - name: Verify downloaded assets
+        working-directory: release
+        run: sha256sum --check SHA256SUMS.txt
+
+      - name: Create or update versioned release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          assets=(OfflineGuard.dylib VERSION.txt SHA256SUMS.txt THIRD_PARTY_NOTICES.md)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag \
+              --title "OfflineGuard $RELEASE_TAG" \
+              --generate-notes
+          fi

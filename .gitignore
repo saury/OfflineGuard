@@ -1,0 +1,17 @@
+# Build outputs and local test artifacts
+/build/
+/DerivedData/
+*.dSYM/
+
+# Xcode user-specific settings
+xcuserdata/
+*.xcuserstate
+
+# macOS metadata
+.DS_Store
+._*
+
+# Editor temporary files
+*.swp
+*.swo
+*~
