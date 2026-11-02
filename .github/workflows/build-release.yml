@@ -61,7 +61,7 @@ jobs:
           make
           codesign --verify --strict --verbose=2 build/OfflineGuard.dylib
           file build/OfflineGuard.dylib
-          xcrun lipo -verify_arch arm64 build/OfflineGuard.dylib
+          xcrun lipo build/OfflineGuard.dylib -verify_arch arm64
 
       - name: Prepare release assets
         run: |
